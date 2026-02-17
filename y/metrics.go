@@ -63,6 +63,10 @@ var (
 	numCompactions *expvar.Int
 	// numCompactionsByLevel tracks compactions by level transition (e.g., "L0->L1")
 	numCompactionsByLevel *expvar.Map
+	// compactionDurationOverall tracks compaction duration as a histogram (overall)
+	compactionDurationOverall *histogram
+	// compactionDurationByLevel tracks compaction duration as a histogram by level
+	compactionDurationByLevel *expvar.Map
 	// Total writes by a user in bytes
 	numBytesWrittenUser *expvar.Int
 )
@@ -102,6 +106,13 @@ func init() {
 	// Compaction metrics
 	numCompactions = expvar.NewInt(BADGER_METRIC_PREFIX + "compaction_num_total")
 	numCompactionsByLevel = expvar.NewMap(BADGER_METRIC_PREFIX + "compaction_num_by_level")
+
+	// Compaction duration histograms
+	// Buckets: 1ms, 5ms, 10ms, 50ms, 100ms, 500ms, 1s, 5s, 10s, 30s, 60s, more
+	compactionDurationOverall = newHistogram(
+		BADGER_METRIC_PREFIX+"compaction_duration_seconds",
+		[]float64{0.001, 0.005, 0.010, 0.050, 0.100, 0.500, 1.0, 5.0, 10.0, 30.0, 60.0})
+	compactionDurationByLevel = expvar.NewMap(BADGER_METRIC_PREFIX + "compaction_duration_seconds_by_level")
 }
 
 func NumIteratorsCreatedAdd(enabled bool, val int64) {
@@ -164,12 +175,89 @@ func NumCompactionsAdd(enabled bool, val int64) {
 	addInt(enabled, numCompactions, val)
 }
 
+// histogramBucket represents a single bucket in the histogram
+type histogramBucket struct {
+	upperBound float64
+	count      *expvar.Int
+}
+
+// histogram represents a histogram with multiple buckets
+type histogram struct {
+	name         string
+	buckets      []*histogramBucket
+	infCount     *expvar.Int // Count for values > max bucket upper bound
+	totalCount   *expvar.Int
+	sum          *expvar.Float
+}
+
+// newHistogram creates a new histogram with the given bucket bounds (in seconds)
+func newHistogram(name string, buckets []float64) *histogram {
+	h := &histogram{
+		name:       name,
+		buckets:    make([]*histogramBucket, len(buckets)),
+		infCount:   expvar.NewInt(name + "_count_inf"),
+		totalCount: expvar.NewInt(name + "_count"),
+		sum:        expvar.NewFloat(name + "_sum"),
+	}
+	for i, bound := range buckets {
+		h.buckets[i] = &histogramBucket{
+			upperBound: bound,
+			count:      expvar.NewInt(name + "_bucket{le=\"" + fmt.Sprintf("%g", bound) + "\"}"),
+		}
+	}
+	return h
+}
+
+// observe adds a duration to the histogram (duration should be in seconds)
+func (h *histogram) observe(d float64) {
+	h.sum.Add(d)
+	h.totalCount.Add(1)
+	for _, b := range h.buckets {
+		if d <= b.upperBound {
+			b.count.Add(1)
+			return
+		}
+	}
+	// Value is above all buckets, increment the infinity bucket
+	h.infCount.Add(1)
+}
+
+// String returns a string representation of the histogram (required for expvar.Var interface)
+func (h *histogram) String() string {
+	return fmt.Sprintf("%s: totalCount=%d, sum=%.6f", h.name, h.totalCount.Value(), h.sum.Value())
+}
+
 func NumCompactionsByLevelAdd(enabled bool, fromLevel, toLevel int, val int64) {
 	if !enabled {
 		return
 	}
 	key := fmt.Sprintf("L%d->L%d", fromLevel, toLevel)
 	addToMap(enabled, numCompactionsByLevel, key, val)
+}
+
+// CompactionDurationObserve records a compaction duration in the overall histogram
+func CompactionDurationObserve(enabled bool, duration float64) {
+	if !enabled || compactionDurationOverall == nil {
+		return
+	}
+	compactionDurationOverall.observe(duration)
+}
+
+// CompactionDurationByLevelObserve records a compaction duration for a specific level
+func CompactionDurationByLevelObserve(enabled bool, level int, duration float64) {
+	if !enabled {
+		return
+	}
+	key := fmt.Sprintf("L%d", level)
+	if h, ok := compactionDurationByLevel.Get(key).(*histogram); ok {
+		h.observe(duration)
+		return
+	}
+	// Create new histogram for this level if it doesn't exist
+	h := newHistogram(BADGER_METRIC_PREFIX+"compaction_duration_seconds_by_level{level=\""+key+"\"}",
+		[]float64{0.001, 0.005, 0.010, 0.050, 0.100, 0.500, 1.0, 5.0, 10.0, 30.0, 60.0})
+	compactionDurationByLevel.Set(key, h)
+	h.observe(duration)
 }
 
 func LSMSizeSet(enabled bool, key string, val expvar.Var) {
