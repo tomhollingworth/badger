@@ -18,6 +18,7 @@ package y
 
 import (
 	"expvar"
+	"fmt"
 )
 
 const (
@@ -69,6 +70,10 @@ var (
 	numMemtableGets *expvar.Int
 	// numCompactionTables is the number of tables being compacted
 	numCompactionTables *expvar.Int
+	// numCompactions is the total number of compactions that have occurred
+	numCompactions *expvar.Int
+	// numCompactionsByLevel tracks compactions by level transition (e.g., "L0->L1")
+	numCompactionsByLevel *expvar.Map
 	// Total writes by a user in bytes
 	numBytesWrittenUser *expvar.Int
 )
@@ -104,6 +109,10 @@ func init() {
 
 	pendingWrites = expvar.NewMap(BADGER_METRIC_PREFIX + "write_pending_num_memtable")
 	numCompactionTables = expvar.NewInt(BADGER_METRIC_PREFIX + "compaction_current_num_lsm")
+
+	// Compaction metrics
+	numCompactions = expvar.NewInt(BADGER_METRIC_PREFIX + "compaction_num_total")
+	numCompactionsByLevel = expvar.NewMap(BADGER_METRIC_PREFIX + "compaction_num_by_level")
 }
 
 func NumIteratorsCreatedAdd(enabled bool, val int64) {
@@ -160,6 +169,18 @@ func NumMemtableGetsAdd(enabled bool, val int64) {
 
 func NumCompactionTablesAdd(enabled bool, val int64) {
 	addInt(enabled, numCompactionTables, val)
+}
+
+func NumCompactionsAdd(enabled bool, val int64) {
+	addInt(enabled, numCompactions, val)
+}
+
+func NumCompactionsByLevelAdd(enabled bool, fromLevel, toLevel int, val int64) {
+	if !enabled {
+		return
+	}
+	key := fmt.Sprintf("L%d->L%d", fromLevel, toLevel)
+	addToMap(enabled, numCompactionsByLevel, key, val)
 }
 
 func LSMSizeSet(enabled bool, key string, val expvar.Var) {
