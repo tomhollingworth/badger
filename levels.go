@@ -1469,6 +1469,10 @@ func (s *levelsController) runCompactDef(id, l int, cd compactDef) (err error) {
 		y.NumBytesCompactionWrittenAdd(s.kv.opt.MetricsEnabled, nextLevel.strLevel, sizeNewTables)
 		y.NumCompactionsAdd(s.kv.opt.MetricsEnabled, 1)
 		y.NumCompactionsByLevelAdd(s.kv.opt.MetricsEnabled, cd.thisLevel.level, cd.nextLevel.level, 1)
+		// Record compaction duration histogram
+		durSeconds := float64(time.Since(timeStart)) / float64(time.Second)
+		y.CompactionDurationObserve(s.kv.opt.MetricsEnabled, durSeconds)
+		y.CompactionDurationByLevelObserve(s.kv.opt.MetricsEnabled, cd.thisLevel.level, durSeconds)
 	}
 
 	// See comment earlier in this function about the ordering of these ops, and the order in which
