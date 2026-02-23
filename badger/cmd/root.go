@@ -41,7 +41,7 @@ func init() {
 	RootCmd.PersistentFlags().StringVar(&vlogDir, "vlog-dir", "",
 		"Directory where the value log files are located, if different from --dir")
 
-	RootCmd.PersistentFlags().IntVar(&vMaxLevels, "max-levels", 7, 
+	RootCmd.PersistentFlags().IntVar(&vMaxLevels, "max-levels", 7,
 		"Maximum number of levels in the LSM tree")
 }
 

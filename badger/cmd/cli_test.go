@@ -31,7 +31,11 @@ func TestMaxLevelsFlag(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir, err := os.MkdirTemp("", "badger-max-levels-test")
 			require.NoError(t, err)
-			defer os.RemoveAll(dir)
+			defer func() {
+				if err := os.RemoveAll(dir); err != nil {
+					t.Fatalf("Failed to clean up temp directory: %v", err)
+				}
+			}()
 
 			// Set the vMaxLevels variable to test value
 			oldMaxLevels := vMaxLevels
