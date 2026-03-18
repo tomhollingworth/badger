@@ -258,7 +258,65 @@ func CreateTable(fname string, builder *Builder) (*Table, error) {
 	if err := z.Msync(mf.Data); err != nil {
 		return nil, y.Wrapf(err, "while calling msync on %s", fname)
 	}
+
+	// Validate the footer written to the mmap before opening. This diagnostic
+	// check detects corruption introduced during bd.Copy by verifying that the
+	// checksum length and index length in the file footer are sane relative to
+	// the file size. If they are not, the table is corrupt and we return an
+	// error rather than panicking in initIndex.
+	if err := validateFooter(mf.Data, fname); err != nil {
+		mf.Close(-1)
+		// Remove the corrupt file so it doesn't linger on disk.
+		os.Remove(fname)
+		return nil, err
+	}
+
 	return OpenTable(mf, *builder.opts)
+}
+
+// validateFooter performs a sanity check on the table footer stored in data.
+// The footer layout is: [index | indexLen(4B) | checksum | checksumLen(4B)].
+// Returns an error if the encoded lengths are inconsistent with the file size.
+func validateFooter(data []byte, fname string) error {
+	sz := len(data)
+	if sz < 8 {
+		return errors.Errorf("table %s too small (%d bytes) to contain a valid footer", fname, sz)
+	}
+
+	checksumLen := int(y.BytesToU32(data[sz-4 : sz]))
+	if checksumLen < 0 || checksumLen > sz-8 {
+		return errors.Errorf(
+			"FOOTER_CORRUPTION: table %s (size %d): invalid checksumLen %d."+
+				" Footer bytes (last 16): [% x]",
+			fname, sz, checksumLen, tailBytes(data, 16))
+	}
+
+	indexLenOffset := sz - 4 - checksumLen - 4
+	if indexLenOffset < 0 || indexLenOffset+4 > sz {
+		return errors.Errorf(
+			"FOOTER_CORRUPTION: table %s (size %d): checksumLen %d produces"+
+				" out-of-bounds indexLen offset %d. Footer bytes (last 16): [% x]",
+			fname, sz, checksumLen, indexLenOffset, tailBytes(data, 16))
+	}
+
+	indexLen := int(y.BytesToU32(data[indexLenOffset : indexLenOffset+4]))
+	indexStart := indexLenOffset - indexLen
+	if indexLen < 0 || indexStart < 0 {
+		return errors.Errorf(
+			"FOOTER_CORRUPTION: table %s (size %d): invalid indexLen %d"+
+				" (checksumLen %d, indexStart %d). Footer bytes (last 16): [% x]",
+			fname, sz, indexLen, checksumLen, indexStart, tailBytes(data, 16))
+	}
+
+	return nil
+}
+
+// tailBytes returns the last n bytes of data, or all of data if len(data) < n.
+func tailBytes(data []byte, n int) []byte {
+	if len(data) < n {
+		return data
+	}
+	return data[len(data)-n:]
 }
 
 // OpenTable assumes file has only one table and opens it. Takes ownership of fd upon function
@@ -426,6 +484,11 @@ func (t *Table) initIndex() (*fb.BlockOffset, error) {
 	if checksumLen < 0 {
 		return nil, errors.New("checksum length less than zero. Data corrupted")
 	}
+	if checksumLen > t.tableSize-8 {
+		return nil, errors.Errorf(
+			"checksum length %d exceeds table size %d. Data corrupted. File: %s",
+			checksumLen, t.tableSize, t.Filename())
+	}
 
 	// Read checksum.
 	expectedChk := &pb.Checksum{}
@@ -437,8 +500,18 @@ func (t *Table) initIndex() (*fb.BlockOffset, error) {
 
 	// Read index size from the footer.
 	readPos -= 4
+	if readPos < 0 {
+		return nil, errors.Errorf(
+			"readPos underflow after checksum (checksumLen=%d, tableSize=%d). File: %s",
+			checksumLen, t.tableSize, t.Filename())
+	}
 	buf = t.readNoFail(readPos, 4)
 	t.indexLen = int(y.BytesToU32(buf))
+	if t.indexLen < 0 || t.indexLen > readPos {
+		return nil, errors.Errorf(
+			"invalid index length %d (readPos=%d, tableSize=%d). Data corrupted. File: %s",
+			t.indexLen, readPos, t.tableSize, t.Filename())
+	}
 
 	// Read index.
 	readPos -= t.indexLen
