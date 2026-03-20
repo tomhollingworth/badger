@@ -255,19 +255,61 @@ func (b *Block) verifyCheckSum() error {
 
 func CreateTable(fname string, builder *Builder) (*Table, error) {
 	bd := builder.Done()
-	mf, err := z.OpenMmapFile(fname, os.O_CREATE|os.O_RDWR|os.O_EXCL, bd.Size)
+
+	// Write to a temporary file first, then atomically rename to the final
+	// path. This prevents a crash between file creation and msync from
+	// leaving a corrupt .sst file that badger would try to open on restart.
+	tmpName := fname + ".tmp"
+	mf, err := z.OpenMmapFile(tmpName, os.O_CREATE|os.O_RDWR|os.O_TRUNC, bd.Size)
 	if err == z.NewFile {
 		// Expected.
 	} else if err != nil {
-		return nil, y.Wrapf(err, "while creating table: %s", fname)
-	} else {
-		return nil, errors.Errorf("file already exists: %s", fname)
+		return nil, y.Wrapf(err, "while creating temp table: %s", tmpName)
 	}
 
 	written := bd.Copy(mf.Data)
 	y.AssertTrue(written == len(mf.Data))
 	if err := z.Msync(mf.Data); err != nil {
-		return nil, y.Wrapf(err, "while calling msync on %s", fname)
+		mf.Close(-1)
+		os.Remove(tmpName)
+		return nil, y.Wrapf(err, "while calling msync on %s", tmpName)
+	}
+
+	// Validate the footer written to the mmap before committing. This
+	// diagnostic check detects corruption introduced during bd.Copy by
+	// verifying that the checksum length and index length in the file footer
+	// are sane relative to the file size.
+	if err := validateFooter(mf.Data, tmpName); err != nil {
+		mf.Close(-1)
+		os.Remove(tmpName)
+		return nil, err
+	}
+
+	// Flush file metadata to durable storage before renaming.
+	if err := mf.Fd.Sync(); err != nil {
+		mf.Close(-1)
+		os.Remove(tmpName)
+		return nil, y.Wrapf(err, "while calling fdatasync on %s", tmpName)
+	}
+
+	// Close the temp mmap before rename so we can reopen at the final path.
+	if err := mf.Close(-1); err != nil {
+		os.Remove(tmpName)
+		return nil, y.Wrapf(err, "while closing temp table: %s", tmpName)
+	}
+
+	// Atomic rename — on Linux this is guaranteed atomic within the same
+	// directory/filesystem. After this point, fname is either fully valid
+	// or absent.
+	if err := os.Rename(tmpName, fname); err != nil {
+		os.Remove(tmpName)
+		return nil, y.Wrapf(err, "while renaming temp table %s to %s", tmpName, fname)
+	}
+
+	// Reopen the table at its final path.
+	mf, err = z.OpenMmapFile(fname, os.O_RDWR, bd.Size)
+	if err != nil {
+		return nil, y.Wrapf(err, "while reopening table: %s", fname)
 	}
 	return OpenTable(mf, *builder.opts)
 }
