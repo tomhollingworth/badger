@@ -271,7 +271,7 @@ func CreateTable(fname string, builder *Builder) (*Table, error) {
 	if err := validateFooter(mf.Data, tmpName); err != nil {
 		mf.Close(-1)
 		os.Remove(tmpName)
-		return nil, err
+		return nil, y.Wrapf(err, "while creating temp table: %s", tmpName)
 	}
 
 	// Flush file metadata to durable storage before renaming.
